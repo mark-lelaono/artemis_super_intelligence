@@ -1,0 +1,8 @@
+# Data layer only — no credentials needed.
+httpx>=0.27
+
+# Agent layer — needs ANTHROPIC_API_KEY.
+anthropic>=0.70
+
+# Tests
+pytest>=8.0
