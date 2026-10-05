@@ -1,12 +1,14 @@
 """The agent loop: Claude with whatever systems the registry holds.
 
-Opus 5.5 request-shape notes, each of which is a 400 or a silent quality loss
-if an older pattern is carried forward:
+The model is selectable (`--model`), and the model-specific half of the
+request is built by `artemis.core.models`, because the Claude families disagree
+about how thinking is configured and whether `effort` exists at all. Read that
+module before changing anything here.
 
-- No `temperature` / `top_p` / `top_k`. Any value is rejected.
-- No `thinking` field. Adaptive thinking is always on and cannot be disabled;
-  `output_config.effort` is the only control over depth. Default effort is
-  `medium`; analysis runs here at `high`.
+What this loop owns, independent of model:
+
+- No `temperature` / `top_p` / `top_k` is ever sent. No current model accepts
+  them.
 - `max_tokens` covers thinking *plus* response text, so it is set generously.
 - Assistant turns are appended **verbatim** (`response.content`), never rebuilt
   by filtering for text blocks. Thinking blocks must be returned unmodified or
@@ -22,11 +24,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import prompt as prompt_mod
+from .models import build_params
 from .registry import Registry
 
-MODEL = "claude-opus-5-5"
-MAX_TOKENS = 32000        # thinking + text
-EFFORT = "high"
+DEFAULT_MODEL = "claude-opus-5-5"
+DEFAULT_MAX_TOKENS = 32000    # thinking + text
+DEFAULT_EFFORT = "high"       # analysis; the API default is "medium"
 MAX_TURNS = 16
 
 
@@ -39,6 +42,8 @@ class Trace:
     input_tokens: int = 0
     output_tokens: int = 0
     stopped_because: str = ""
+    model: str = ""
+    notes: list[str] = field(default_factory=list)
 
     def render(self, width: int = 300) -> str:
         if not self.calls:
@@ -51,7 +56,8 @@ class Trace:
 
     def summary(self) -> str:
         return (
-            f"{self.turns} turn(s), {len(self.calls)} tool call(s), "
+            f"{self.model or 'model?'}: {self.turns} turn(s), "
+            f"{len(self.calls)} tool call(s), "
             f"{self.input_tokens} in / {self.output_tokens} out tokens"
             + (f", stopped: {self.stopped_because}" if self.stopped_because else "")
         )
@@ -61,6 +67,9 @@ def ask(
     question: str,
     registry: Registry,
     *,
+    model: str = DEFAULT_MODEL,
+    effort: str | None = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
     extra_instructions: str | None = None,
     verbose: bool = False,
     max_turns: int = MAX_TURNS,
@@ -68,8 +77,15 @@ def ask(
 ) -> tuple[str, Trace]:
     """Answer `question` using the connected systems. Returns (answer, trace).
 
-    `client` is injectable so the loop can be tested without a network call.
+    `effort` defaults to "high" on models that support it, and must be None for
+    models that do not (see `artemis.core.models`). `client` is injectable so
+    the loop can be tested without a network call.
+
+    Raises `UnsupportedSetting` for a model/effort pair the API would reject.
     """
+    model_params, notes = build_params(
+        model, effort=effort, max_tokens=max_tokens
+    )
     if client is None:
         import anthropic  # imported late: only this path needs credentials
 
@@ -78,15 +94,16 @@ def ask(
     system_prompt = prompt_mod.build(registry.systems_overview(), extra_instructions)
     tools = registry.tools()
     messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
-    trace = Trace()
+    trace = Trace(model=model, notes=notes)
+    if verbose:
+        for note in notes:
+            print(f"  note: {note}", flush=True)
 
     for _ in range(max_turns):
         response = client.messages.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
+            **model_params,
             system=system_prompt,
             tools=tools,
-            output_config={"effort": EFFORT},
             messages=messages,
         )
         trace.turns += 1

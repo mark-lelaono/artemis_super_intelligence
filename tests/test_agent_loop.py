@@ -15,10 +15,13 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from artemis.core.agent import ask  # noqa: E402
+from artemis.core.agent import DEFAULT_MODEL, ask  # noqa: E402
 from artemis.core.connector import Connector  # noqa: E402
+from artemis.core.models import UnsupportedSetting  # noqa: E402
 from artemis.core.registry import Registry  # noqa: E402
 
 
@@ -143,20 +146,64 @@ def test_refusal_is_handled_before_content_is_read():
     assert trace.stopped_because == "refusal (cyber)"
 
 
-def test_request_shape_matches_opus_5_5():
+def test_default_request_shape():
     client = FakeClient([_resp([_text("ok")])])
     ask("q", Registry([Echo()]), client=client)
     req = client.requests[0]
-    assert req["model"] == "claude-opus-5-5"
-    # Rejected with a 400 on this model family.
+    assert req["model"] == DEFAULT_MODEL == "claude-opus-5-5"
+    # Rejected with a 400 on every current model.
     assert "temperature" not in req
     assert "top_p" not in req and "top_k" not in req
-    # Adaptive thinking is always on; effort is the only depth control.
+    # Thinking is always on for this model; effort is the only depth control.
     assert "thinking" not in req
     assert req["output_config"] == {"effort": "high"}
     # max_tokens must cover thinking plus text.
     assert req["max_tokens"] >= 16000
     assert req["tools"][0]["name"] == "echo__get"
+
+
+def test_model_override_reaches_the_request():
+    client = FakeClient([_resp([_text("ok")])])
+    _, trace = ask("q", Registry([Echo()]), model="claude-sonnet-5", client=client)
+    req = client.requests[0]
+    assert req["model"] == "claude-sonnet-5"
+    # Sonnet 5 needs adaptive requested explicitly.
+    assert req["thinking"] == {"type": "adaptive"}
+    assert trace.model == "claude-sonnet-5"
+
+
+def test_haiku_gets_a_budget_and_no_effort():
+    client = FakeClient([_resp([_text("ok")])])
+    _, trace = ask(
+        "q", Registry([Echo()]), model="claude-haiku-4-5",
+        max_tokens=8000, client=client,
+    )
+    req = client.requests[0]
+    assert "output_config" not in req
+    assert req["thinking"]["type"] == "enabled"
+    assert req["thinking"]["budget_tokens"] < 8000
+    assert any("manual thinking budget" in n for n in trace.notes)
+
+
+def test_effort_override_reaches_the_request():
+    client = FakeClient([_resp([_text("ok")])])
+    ask("q", Registry([Echo()]), effort="low", client=client)
+    assert client.requests[0]["output_config"] == {"effort": "low"}
+
+
+def test_bad_model_effort_pair_fails_before_any_request():
+    client = FakeClient([_resp([_text("ok")])])
+    with pytest.raises(UnsupportedSetting):
+        ask("q", Registry([Echo()]), model="claude-haiku-4-5",
+            effort="high", client=client)
+    # Nothing was sent: the error is local, not a wasted API call.
+    assert client.requests == []
+
+
+def test_trace_records_the_model_used():
+    client = FakeClient([_resp([_text("ok")])])
+    _, trace = ask("q", Registry([Echo()]), client=client)
+    assert "claude-opus-5-5" in trace.summary()
 
 
 def test_max_turns_is_enforced():

@@ -25,15 +25,16 @@ time, which is why it tracks each new forecast issue without a code change.
 
 | Component | State |
 |---|---|
-| Connector contract, registry, prompt (`artemis/core/`) | Working, 50 offline tests |
+| Connector contract, registry, prompt, model shapes (`artemis/core/`) | Working, 101 offline tests |
 | Agent loop (`artemis/core/agent.py`) | **Loop verified with a fake client; never run against the real API** |
 | ICPAC Hazards Watch connector (`artemis/connectors/eahw/`) | **Working, verified live** |
 | AWS Athena connector (`artemis/connectors/athena.py`) | **Contract only — every call raises** |
 | Vector/exposure layers, zonal statistics, streaming | Not built |
-| Tests | 50 offline + 6 live, all passing |
+| Tests | 101 offline + 6 live, all passing |
 
-The data path is proven end to end. The LLM path is structurally tested but has
-never spent a token, because no API key was available when it was written. Set
+The data path is proven end to end. The LLM path is structurally tested — every
+model's request shape is asserted against a fake client — but has never spent a
+token, because no API key was available when it was written. Set
 `ANTHROPIC_API_KEY` and run `python -m artemis ask --trace` to be the first.
 
 **This is a foundation to build on, not a finished product.** The name is
@@ -64,6 +65,39 @@ python -m artemis ask "Compare this week's rainfall forecast for Nairobi, Juba \
 and Mogadishu and say what it means for flood risk" --trace
 ```
 
+### Choosing a model
+
+```bash
+python -m artemis models                                   # known models + shapes
+python -m artemis ask "..." --model claude-sonnet-5        # cheaper, still strong
+python -m artemis ask "..." --model claude-haiku-4-5       # cheapest
+python -m artemis ask "..." --effort max                   # deeper reasoning
+python -m artemis ask "..." --max-tokens 64000
+```
+
+Default is `claude-opus-5-5` at effort `high`.
+
+**Swapping the model string is not enough, and Artemis handles the difference
+for you.** The Claude families disagree about how thinking is configured and
+whether `effort` exists at all, so `artemis/core/models.py` builds the
+model-specific half of each request:
+
+| Family | Thinking | Effort |
+|---|---|---|
+| Opus 5.5, Opus 5, Fable 5/5.1 | Always on — send no `thinking` field | `low`…`max` |
+| Opus 4.8/4.7, Sonnet 5 | `{"type": "adaptive"}`, **sent explicitly** | `low`…`max` |
+| Opus 4.6, Sonnet 4.6 | `{"type": "adaptive"}` | no `xhigh` |
+| Haiku 4.5 | `{"type": "enabled", "budget_tokens": N}` | **rejected** |
+
+Two consequences worth knowing. On Opus 4.8 and earlier, *omitting* the thinking
+field means the model runs with no thinking at all — a silent quality loss on
+analytical work, not an error — so Artemis always sends it explicitly there. And
+`--effort` with Haiku fails locally with exit 2 before any request is made,
+rather than costing you a 400 after you have typed the question.
+
+An unrecognised model ID is accepted and assumed to be newer than the table;
+`--trace` says so.
+
 ## Architecture
 
 ```
@@ -72,7 +106,8 @@ artemis/
     connector.py   # the ABC you implement: tools(), dispatch(), health()
     registry.py    # namespaces tools, routes calls, never raises at the boundary
     prompt.py      # the provenance discipline, stated to the model
-    agent.py       # the Opus 5.5 tool-use loop
+    models.py      # per-model request shapes (thinking, effort)
+    agent.py       # the tool-use loop
   connectors/
     eahw/          # ICPAC Hazards Watch — working
     athena.py      # AWS Athena — contract only

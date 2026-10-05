@@ -6,6 +6,8 @@ import argparse
 import json
 import sys
 
+from .core.agent import DEFAULT_MAX_TOKENS, DEFAULT_MODEL
+from .core.models import ALL_EFFORT
 from .core.registry import Registry
 from .connectors.eahw import EAHWConnector
 from .connectors.eahw.places import KNOWN_PLACES
@@ -101,12 +103,41 @@ def cmd_health(args: argparse.Namespace) -> int:
 
 def cmd_ask(args: argparse.Namespace) -> int:
     from .core.agent import ask  # late import: needs ANTHROPIC_API_KEY
+    from .core.models import UnsupportedSetting
 
-    answer, trace = ask(args.question, build_registry(), verbose=args.verbose)
+    try:
+        answer, trace = ask(
+            args.question,
+            build_registry(),
+            model=args.model,
+            effort=args.effort,
+            max_tokens=args.max_tokens,
+            verbose=args.verbose,
+        )
+    except UnsupportedSetting as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     print(answer)
     if args.trace:
         print(f"\n--- {trace.summary()} ---")
+        for note in trace.notes:
+            print(f"note: {note}")
         print(trace.render())
+    return 0
+
+
+def cmd_models(args: argparse.Namespace) -> int:
+    from .core.agent import DEFAULT_EFFORT, DEFAULT_MODEL
+    from .core.models import PROFILES
+
+    print(f"default: {DEFAULT_MODEL} at effort {DEFAULT_EFFORT}\n")
+    for name, profile in PROFILES.items():
+        effort = ", ".join(profile.effort_levels) or "not supported"
+        mark = " (default)" if name == DEFAULT_MODEL else ""
+        print(f"  {name}{mark}")
+        print(f"      thinking={profile.thinking}  effort={effort}")
+    print("\nAn unlisted model ID is accepted and assumed to be newer than this")
+    print("table; --trace will say so.")
     return 0
 
 
@@ -140,9 +171,26 @@ def main(argv: list[str] | None = None) -> int:
 
     a = sub.add_parser("ask", help="ask the agent (needs ANTHROPIC_API_KEY)")
     a.add_argument("question")
+    a.add_argument(
+        "--model", default=DEFAULT_MODEL,
+        help=f"Claude model ID (default: {DEFAULT_MODEL}). "
+             "See `artemis models` for what is known.",
+    )
+    a.add_argument(
+        "--effort", choices=ALL_EFFORT, default=None,
+        help="thinking depth; defaults to 'high' on models that support it, "
+             "and must be omitted for models that do not (e.g. Haiku).",
+    )
+    a.add_argument(
+        "--max-tokens", type=int, default=DEFAULT_MAX_TOKENS, dest="max_tokens",
+        help=f"cap on thinking plus response text (default: {DEFAULT_MAX_TOKENS})",
+    )
     a.add_argument("--trace", action="store_true", help="print the call trace")
     a.add_argument("--verbose", action="store_true", help="stream tool calls")
     a.set_defaults(func=cmd_ask)
+
+    m = sub.add_parser("models", help="list known models and their request shapes")
+    m.set_defaults(func=cmd_models)
 
     args = p.parse_args(argv)
     if args.cmd == "query" and not args.place and (args.lon is None or args.lat is None):
