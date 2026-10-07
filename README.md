@@ -117,6 +117,10 @@ artemis/
 Adding a system means implementing three methods. See
 **[docs/CONNECTORS.md](docs/CONNECTORS.md)**.
 
+For the full path from a typed question to a cited answer — every step, the
+technology behind it, and where credentials sit — see
+**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+
 ### Why there is no universal `read()` method
 
 The obvious design — one `read(dataset, **selectors)` for everything — is wrong.
